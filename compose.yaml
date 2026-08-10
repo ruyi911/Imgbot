@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: imgbot
+      POSTGRES_USER: imgbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imgbot -d imgbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN}
+      BOT_INSTANCE_ID: ${BOT_INSTANCE_ID:?set BOT_INSTANCE_ID}
+      DATABASE_URL: postgresql+asyncpg://imgbot:${POSTGRES_PASSWORD}@postgres:5432/imgbot
+      SUPER_ADMIN_IDS: ${SUPER_ADMIN_IDS:?set SUPER_ADMIN_IDS}
+      BUSINESS_TIMEZONE: ${BUSINESS_TIMEZONE:-Asia/Kolkata}
+      ALBUM_SETTLE_SECONDS: ${ALBUM_SETTLE_SECONDS:-1.5}
+      MIN_GROUP_REPLY_INTERVAL_SECONDS: ${MIN_GROUP_REPLY_INTERVAL_SECONDS:-3.1}
+      REPLY_POLL_SECONDS: ${REPLY_POLL_SECONDS:-0.5}
+      REPLY_MAX_ATTEMPTS: ${REPLY_MAX_ATTEMPTS:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+
