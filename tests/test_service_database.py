@@ -114,3 +114,22 @@ async def test_super_admin_can_remove_and_readd_regular_admin(service: BotServic
     assert [(item.telegram_user_id, item.display_name) for item in administrators] == [
         (556, "李四")
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_page_content_is_saved_separately_from_group_reply(service: BotService) -> None:
+    start_page = await service.get_start_page()
+    assert start_page.text == "欢迎使用本机器人。"
+    assert start_page.photo_file_id is None
+
+    await service.update_start_page_text("<b>欢迎</b>", actor_user_id=42)
+    await service.update_start_page_photo("photo-file-id", actor_user_id=42)
+    rows = service.parse_button_definition("1|1|官方群|https://t.me/example")
+    await service.replace_start_page_buttons(rows, actor_user_id=42)
+
+    text, photo_file_id, keyboard = await service.start_page_payload()
+    assert text == "<b>欢迎</b>"
+    assert photo_file_id == "photo-file-id"
+    assert keyboard is not None
+    assert keyboard.inline_keyboard[0][0].text == "官方群"
+    assert keyboard.inline_keyboard[0][0].url == "https://t.me/example"

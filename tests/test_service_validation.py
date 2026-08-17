@@ -58,3 +58,8 @@ def test_template_only_accepts_supported_fields() -> None:
     BotService.validate_template("你好 {display_name}，编号 {tg_id}")
     with pytest.raises(ValueError, match="不支持的变量"):
         BotService.validate_template("{unknown_field}")
+
+
+def test_start_page_text_rejects_more_than_photo_caption_limit() -> None:
+    with pytest.raises(ValueError, match="1024"):
+        BotService.validate_start_page_text("x" * 1025)

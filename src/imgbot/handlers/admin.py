@@ -29,6 +29,7 @@ from imgbot.states import (
     BindingStates,
     ButtonStates,
     ExportStates,
+    StartPageStates,
     TemplateStates,
 )
 from imgbot.timeutils import ensure_utc, local_day_bounds, parse_local_range, utc_now
@@ -43,7 +44,9 @@ def is_super_admin(user_id: int, settings: Settings) -> bool:
     return user_id in settings.super_admin_ids
 
 
-async def has_admin_access(user_id: int, settings: Settings, service: BotService) -> bool:
+async def has_admin_access(
+    user_id: int, settings: Settings, service: BotService
+) -> bool:
     return is_super_admin(user_id, settings) or await service.is_admin(user_id)
 
 
@@ -69,6 +72,18 @@ async def reject_message(message: Message) -> None:
 
 async def reject_callback(callback: CallbackQuery) -> None:
     await callback.answer("Hello", show_alert=True)
+
+
+def admin_preview(value: str, *, limit: int = 3000) -> str:
+    rendered: list[str] = []
+    length = 0
+    for character in value:
+        escaped = html.escape(character)
+        if length + len(escaped) > limit:
+            return "".join(rendered) + "\n…（内容过长，已截断显示）"
+        rendered.append(escaped)
+        length += len(escaped)
+    return "".join(rendered)
 
 
 async def render_home(
@@ -104,17 +119,26 @@ async def render_home(
     )
 
 
+async def render_start_page(target: Message, service: BotService) -> None:
+    text, photo_file_id, keyboard = await service.start_page_payload()
+    if photo_file_id is not None:
+        await target.answer_photo(
+            photo=photo_file_id, caption=text, reply_markup=keyboard
+        )
+        return
+    await target.answer(text, reply_markup=keyboard)
+
+
 @router.message(CommandStart())
 async def start(
     message: Message, state: FSMContext, service: BotService, settings: Settings
 ) -> None:
-    if message.from_user is None or not await has_admin_access(
+    await state.clear()
+    await render_start_page(message, service)
+    if message.from_user is not None and await has_admin_access(
         message.from_user.id, settings, service
     ):
-        await reject_message(message)
-        return
-    await state.clear()
-    await render_home(message, message.from_user.id, service, settings)
+        await render_home(message, message.from_user.id, service, settings)
 
 
 @router.callback_query(F.data == "admin:home")
@@ -149,7 +173,11 @@ async def begin_binding(
 
 @router.message(BindingStates.waiting_chat_id)
 async def receive_chat_id(
-    message: Message, state: FSMContext, bot: Bot, service: BotService, settings: Settings
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    service: BotService,
+    settings: Settings,
 ) -> None:
     if message.from_user is None or not await has_admin_access(
         message.from_user.id, settings, service
@@ -205,7 +233,11 @@ async def receive_chat_id(
 
 @router.callback_query(BindingStates.confirming, F.data == "bind:confirm")
 async def confirm_group_binding(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, service: BotService, settings: Settings
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    service: BotService,
+    settings: Settings,
 ) -> None:
     if not await has_admin_access(callback.from_user.id, settings, service):
         await reject_callback(callback)
@@ -226,7 +258,10 @@ async def confirm_group_binding(
         await state.clear()
         return
     admin_statuses = {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
-    if bot_member.status not in admin_statuses or actor_member.status not in admin_statuses:
+    if (
+        bot_member.status not in admin_statuses
+        or actor_member.status not in admin_statuses
+    ):
         await callback.answer("机器人或你的管理员权限已发生变化", show_alert=True)
         await state.clear()
         return
@@ -313,6 +348,150 @@ async def cancel_state(
     await render_home(message, message.from_user.id, service, settings)
 
 
+@router.callback_query(F.data == "admin:start_media")
+async def begin_start_page_media(
+    callback: CallbackQuery, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if not await has_admin_access(callback.from_user.id, settings, service):
+        await reject_callback(callback)
+        return
+    start_page = await service.get_start_page()
+    await state.set_state(StartPageStates.waiting_photo)
+    await callback.answer()
+    if start_page.photo_file_id is not None:
+        await callback.message.answer_photo(photo=start_page.photo_file_id)
+    await callback.message.answer(
+        "<b>首页媒体</b>\n\n"
+        f"当前图片：{'已设置' if start_page.photo_file_id else '未设置'}\n\n"
+        "请直接发送要配置的图片\n"
+        "发送 <code>CLEAR</code> 删除当前图片，发送 /cancel 取消。"
+    )
+
+
+@router.message(StartPageStates.waiting_photo, F.photo)
+async def receive_start_page_media(
+    message: Message, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if message.from_user is None or not await has_admin_access(
+        message.from_user.id, settings, service
+    ):
+        await reject_message(message)
+        return
+    await service.update_start_page_photo(
+        message.photo[-1].file_id, message.from_user.id
+    )
+    await state.clear()
+    await message.answer("✅ 首页图片已保存，已覆盖原图片。")
+    await render_home(message, message.from_user.id, service, settings)
+
+
+@router.message(StartPageStates.waiting_photo)
+async def receive_start_page_media_clear(
+    message: Message, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if message.from_user is None or not await has_admin_access(
+        message.from_user.id, settings, service
+    ):
+        await reject_message(message)
+        return
+    if (message.text or "").strip().upper() != "CLEAR":
+        await message.answer(
+            "请直接发送一张图片，或发送 <code>CLEAR</code> 删除当前图片。"
+        )
+        return
+    await service.update_start_page_photo(None, message.from_user.id)
+    await state.clear()
+    await message.answer("✅ 首页图片已删除。")
+    await render_home(message, message.from_user.id, service, settings)
+
+
+@router.callback_query(F.data == "admin:start_text")
+async def begin_start_page_text(
+    callback: CallbackQuery, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if not await has_admin_access(callback.from_user.id, settings, service):
+        await reject_callback(callback)
+        return
+    start_page = await service.get_start_page()
+    await state.set_state(StartPageStates.waiting_text)
+    await callback.answer()
+    await callback.message.answer(
+        "<b>当前首页文案</b>\n\n"
+        f"<pre>{admin_preview(start_page.text)}</pre>\n\n"
+        "请直接发送新的首页文案。文案使用 Telegram HTML 格式，最多 1024 个字符。\n"
+        "发送 /cancel 取消。"
+    )
+
+
+@router.message(StartPageStates.waiting_text)
+async def receive_start_page_text(
+    message: Message, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if message.from_user is None or not await has_admin_access(
+        message.from_user.id, settings, service
+    ):
+        await reject_message(message)
+        return
+    try:
+        await service.update_start_page_text(message.text or "", message.from_user.id)
+    except ValueError as exc:
+        await message.answer(f"首页文案无法保存：{html.escape(str(exc))}")
+        return
+    await state.clear()
+    await message.answer("✅ 首页文案已保存。")
+    await render_home(message, message.from_user.id, service, settings)
+
+
+@router.callback_query(F.data == "admin:start_buttons")
+async def begin_start_page_buttons(
+    callback: CallbackQuery, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if not await has_admin_access(callback.from_user.id, settings, service):
+        await reject_callback(callback)
+        return
+    buttons = await service.list_start_page_buttons()
+    current = (
+        "\n".join(
+            f"{button.row_number + 1}|{button.column_number + 1}|{button.text}|{button.url}"
+            for button in buttons
+        )
+        or "（当前没有按钮）"
+    )
+    await state.set_state(StartPageStates.waiting_buttons)
+    await callback.answer()
+    await callback.message.answer(
+        "<b>当前首页按钮</b>\n"
+        f"<pre>{admin_preview(current)}</pre>\n\n"
+        "请发送完整的新配置，每行格式：\n"
+        "<code>行|列|按钮文字|URL</code>\n\n"
+        "示例：\n"
+        "<pre>1|1|参加其他活动|https://example.com/events\n"
+        "2|1|VIP群|https://t.me/example_vip\n"
+        "2|2|官方频道|https://t.me/example</pre>\n"
+        "每行最多两个按钮。发送 CLEAR 清空按钮，发送 /cancel 取消。"
+    )
+
+
+@router.message(StartPageStates.waiting_buttons)
+async def receive_start_page_buttons(
+    message: Message, state: FSMContext, service: BotService, settings: Settings
+) -> None:
+    if message.from_user is None or not await has_admin_access(
+        message.from_user.id, settings, service
+    ):
+        await reject_message(message)
+        return
+    try:
+        rows = service.parse_button_definition(message.text or "")
+        await service.replace_start_page_buttons(rows, message.from_user.id)
+    except ValueError as exc:
+        await message.answer(f"首页按钮无法保存：{html.escape(str(exc))}")
+        return
+    await state.clear()
+    await message.answer(f"✅ 已保存 {sum(map(len, rows))} 个首页按钮。")
+    await render_home(message, message.from_user.id, service, settings)
+
+
 @router.message(TemplateStates.waiting_text)
 async def receive_template(
     message: Message, state: FSMContext, service: BotService, settings: Settings
@@ -341,10 +520,13 @@ async def begin_buttons(
         await reject_callback(callback)
         return
     buttons = await service.list_buttons()
-    current = "\n".join(
-        f"{button.row_number + 1}|{button.column_number + 1}|{button.text}|{button.url}"
-        for button in buttons
-    ) or "（当前没有按钮）"
+    current = (
+        "\n".join(
+            f"{button.row_number + 1}|{button.column_number + 1}|{button.text}|{button.url}"
+            for button in buttons
+        )
+        or "（当前没有按钮）"
+    )
     await state.set_state(ButtonStates.waiting_definition)
     await callback.answer()
     await callback.message.answer(
@@ -424,7 +606,9 @@ async def select_export_range(
     else:
         await callback.answer("未知时间范围", show_alert=True)
         return
-    await state.update_data(start_utc=start_utc.isoformat(), end_utc=end_utc.isoformat())
+    await state.update_data(
+        start_utc=start_utc.isoformat(), end_utc=end_utc.isoformat()
+    )
     await state.set_state(ExportStates.waiting_format)
     await callback.answer()
     await callback.message.answer("请选择文件格式：", reply_markup=export_formats())
@@ -449,7 +633,9 @@ async def receive_custom_range(
     if end_utc - start_utc > timedelta(days=366):
         await message.answer("单次导出范围不能超过 366 天。")
         return
-    await state.update_data(start_utc=start_utc.isoformat(), end_utc=end_utc.isoformat())
+    await state.update_data(
+        start_utc=start_utc.isoformat(), end_utc=end_utc.isoformat()
+    )
     await state.set_state(ExportStates.waiting_format)
     await message.answer("请选择文件格式：", reply_markup=export_formats())
 
@@ -468,11 +654,17 @@ async def create_export(
     await callback.answer("正在生成文件")
     try:
         data = await state.get_data()
-        start_utc = datetime.fromisoformat(data["start_utc"]).astimezone(ZoneInfo("UTC"))
+        start_utc = datetime.fromisoformat(data["start_utc"]).astimezone(
+            ZoneInfo("UTC")
+        )
         end_utc = datetime.fromisoformat(data["end_utc"]).astimezone(ZoneInfo("UTC"))
         rows = await service.export_rows(start_utc, end_utc)
         timezone = ZoneInfo(settings.business_timezone)
-        payload = build_xlsx(rows, timezone) if suffix == "xlsx" else build_csv(rows, timezone)
+        payload = (
+            build_xlsx(rows, timezone)
+            if suffix == "xlsx"
+            else build_csv(rows, timezone)
+        )
         filename = export_filename(start_utc, end_utc, suffix)
         await callback.message.answer_document(
             BufferedInputFile(payload, filename=filename),
@@ -498,10 +690,12 @@ async def render_administrator_management(
     )
     admin_ids = (
         "\n".join(
-            f"• <code>{item.telegram_user_id}</code>"
-            f"  -  {html.escape(item.display_name)}"
-            if item.display_name
-            else f"• <code>{item.telegram_user_id}</code>"
+            (
+                f"• <code>{item.telegram_user_id}</code>"
+                f"  -  {html.escape(item.display_name)}"
+                if item.display_name
+                else f"• <code>{item.telegram_user_id}</code>"
+            )
             for item in administrators
         )
         or "• 暂无普通管理员"
@@ -569,7 +763,9 @@ async def receive_administrator_id(
             "请让该用户私聊机器人并发送 /start。"
         )
     else:
-        await message.answer(f"管理员 <code>{new_user_id}</code> 已经存在，无需重复新增。")
+        await message.answer(
+            f"管理员 <code>{new_user_id}</code> 已经存在，无需重复新增。"
+        )
     await render_home(message, message.from_user.id, service, settings)
 
 
@@ -597,7 +793,9 @@ async def begin_delete_administrator(
         await callback.answer("该管理员已不存在", show_alert=True)
         return
     name_suffix = (
-        f"  -  {html.escape(administrator.display_name)}" if administrator.display_name else ""
+        f"  -  {html.escape(administrator.display_name)}"
+        if administrator.display_name
+        else ""
     )
     await callback.answer()
     await callback.message.answer(
@@ -621,7 +819,9 @@ async def confirm_delete_administrator_handler(
         await callback.answer("管理员 ID 无效", show_alert=True)
         return
     removed = await service.remove_admin(telegram_user_id, callback.from_user.id)
-    await callback.answer("删除成功" if removed else "该管理员已被删除", show_alert=True)
+    await callback.answer(
+        "删除成功" if removed else "该管理员已被删除", show_alert=True
+    )
     await render_administrator_management(callback.message, service, settings)
 
 

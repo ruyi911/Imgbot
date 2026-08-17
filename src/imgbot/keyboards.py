@@ -4,30 +4,58 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def admin_menu(is_bound: bool, *, is_super_admin: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="🖼 首页媒体", callback_data="admin:start_media"),
+            InlineKeyboardButton(text="📝 首页文案", callback_data="admin:start_text"),
+            InlineKeyboardButton(
+                text="🔗 首页按钮", callback_data="admin:start_buttons"
+            ),
+        ]
+    ]
     if is_bound:
         rows.extend(
             [
                 [
-                    InlineKeyboardButton(text="📝 回复文案", callback_data="admin:template"),
-                    InlineKeyboardButton(text="🔗 按钮设置", callback_data="admin:buttons"),
+                    InlineKeyboardButton(
+                        text="📝 回复文案", callback_data="admin:template"
+                    ),
+                    InlineKeyboardButton(
+                        text="🔗 回复按钮", callback_data="admin:buttons"
+                    ),
                 ],
-                [InlineKeyboardButton(text="📤 导出数据", callback_data="admin:export")],
-                [InlineKeyboardButton(text="⛓️‍💥 解绑群组", callback_data="admin:unbind")],
+                [
+                    InlineKeyboardButton(
+                        text="📤 导出数据", callback_data="admin:export"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⛓️‍💥 解绑群组", callback_data="admin:unbind"
+                    )
+                ],
             ]
         )
         if is_super_admin:
             rows.insert(
                 -1,
                 [
-                    InlineKeyboardButton(text="📊 运行统计", callback_data="admin:stats"),
-                    InlineKeyboardButton(text="🔍 重新验证权限", callback_data="admin:verify"),
+                    InlineKeyboardButton(
+                        text="📊 运行统计", callback_data="admin:stats"
+                    ),
+                    InlineKeyboardButton(
+                        text="🔍 重新验证权限", callback_data="admin:verify"
+                    ),
                 ],
             )
     else:
-        rows.append([InlineKeyboardButton(text="🔗 绑定群组", callback_data="admin:bind")])
+        rows.append(
+            [InlineKeyboardButton(text="🔗 绑定群组", callback_data="admin:bind")]
+        )
     if is_super_admin:
-        rows.append([InlineKeyboardButton(text="👥 管理员管理", callback_data="admin:admins")])
+        rows.append(
+            [InlineKeyboardButton(text="👥 管理员管理", callback_data="admin:admins")]
+        )
     rows.append([InlineKeyboardButton(text="🔄 刷新", callback_data="admin:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -47,7 +75,9 @@ def confirm_unbind() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⚠️ 确认解除", callback_data="unbind:confirm"),
+                InlineKeyboardButton(
+                    text="⚠️ 确认解除", callback_data="unbind:confirm"
+                ),
                 InlineKeyboardButton(text="取消", callback_data="admin:home"),
             ]
         ]

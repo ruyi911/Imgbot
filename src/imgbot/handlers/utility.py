@@ -14,7 +14,7 @@ async def get_id(message: Message) -> None:
             "👤 ID 信息\n\n"
             "发送者 ID：无法获取\n"
             f"聊天 ID：<code>{message.chat.id}</code>\n\n"
-            "该消息以群组或频道身份发送，未读取到真实用户 ID。"
+            "该消息以群组或频道身份发送，没有提供真实个人用户 ID。"
         )
         return
     if message.from_user is None:

@@ -14,6 +14,12 @@ class ButtonStates(StatesGroup):
     waiting_definition = State()
 
 
+class StartPageStates(StatesGroup):
+    waiting_photo = State()
+    waiting_text = State()
+    waiting_buttons = State()
+
+
 class ExportStates(StatesGroup):
     waiting_custom_range = State()
     waiting_format = State()

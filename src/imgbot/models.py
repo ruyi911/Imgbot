@@ -125,6 +125,35 @@ class TemplateButton(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class StartPage(Base):
+    __tablename__ = "start_pages"
+    __table_args__ = (UniqueConstraint("bot_instance_id", name="uq_start_page_instance"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bot_instance_id: Mapped[int] = mapped_column(ForeignKey("bot_instances.id"), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    photo_file_id: Mapped[str | None] = mapped_column(String(255))
+    updated_by: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class StartPageButton(Base):
+    __tablename__ = "start_page_buttons"
+    __table_args__ = (
+        UniqueConstraint(
+            "bot_instance_id", "row_number", "column_number", name="uq_start_button_slot"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bot_instance_id: Mapped[int] = mapped_column(ForeignKey("bot_instances.id"), nullable=False)
+    text: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    column_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
 class Submission(Base):
     __tablename__ = "submissions"
     __table_args__ = (

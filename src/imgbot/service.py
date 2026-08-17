@@ -24,6 +24,8 @@ from imgbot.models import (
     GroupBinding,
     ReplyStatus,
     ReplyTemplate,
+    StartPage,
+    StartPageButton,
     Submission,
     SubmissionPart,
     TemplateButton,
@@ -36,6 +38,7 @@ DEFAULT_TEMPLATE = (
     "📌 已记录 <code>{tg_id}</code> | <b>{display_name}</b>\n"
     "您的信息已登记，发送时间：{send_time}"
 )
+DEFAULT_START_PAGE_TEXT = "欢迎使用本机器人。"
 ALLOWED_TEMPLATE_FIELDS = {
     "tg_id",
     "display_name",
@@ -124,6 +127,17 @@ class BotService:
                         bot_instance_id=instance.id,
                         text=DEFAULT_TEMPLATE,
                         version=1,
+                        updated_at=now,
+                    )
+                )
+            start_page = await session.scalar(
+                select(StartPage).where(StartPage.bot_instance_id == instance.id)
+            )
+            if start_page is None:
+                session.add(
+                    StartPage(
+                        bot_instance_id=instance.id,
+                        text=DEFAULT_START_PAGE_TEXT,
                         updated_at=now,
                     )
                 )
@@ -344,6 +358,71 @@ class BotService:
                 raise RuntimeError("Reply template is missing")
             return template
 
+    async def get_start_page(self) -> StartPage:
+        async with self.sessions() as session:
+            start_page = await session.scalar(
+                select(StartPage).where(StartPage.bot_instance_id == self.instance_id)
+            )
+            if start_page is None:
+                raise RuntimeError("Start page is missing")
+            return start_page
+
+    @staticmethod
+    def validate_start_page_text(text_value: str) -> None:
+        if not text_value.strip():
+            raise ValueError("首页文案不能为空")
+        if len(text_value) > 1024:
+            raise ValueError("首页文案不能超过 1024 个字符")
+
+    async def update_start_page_text(self, text_value: str, actor_user_id: int) -> StartPage:
+        self.validate_start_page_text(text_value)
+        now = utc_now()
+        async with self.sessions.begin() as session:
+            start_page = await session.scalar(
+                select(StartPage).where(StartPage.bot_instance_id == self.instance_id)
+            )
+            if start_page is None:
+                raise RuntimeError("Start page is missing")
+            start_page.text = text_value
+            start_page.updated_by = actor_user_id
+            start_page.updated_at = now
+            session.add(
+                AuditLog(
+                    bot_instance_id=self.instance_id,
+                    actor_user_id=actor_user_id,
+                    action="START_PAGE_TEXT_UPDATED",
+                    details=json.dumps({"length": len(text_value)}),
+                    created_at=now,
+                )
+            )
+            return start_page
+
+    async def update_start_page_photo(
+        self, photo_file_id: str | None, actor_user_id: int
+    ) -> StartPage:
+        if photo_file_id is not None and not photo_file_id.strip():
+            raise ValueError("首页图片标识不能为空")
+        now = utc_now()
+        async with self.sessions.begin() as session:
+            start_page = await session.scalar(
+                select(StartPage).where(StartPage.bot_instance_id == self.instance_id)
+            )
+            if start_page is None:
+                raise RuntimeError("Start page is missing")
+            start_page.photo_file_id = photo_file_id
+            start_page.updated_by = actor_user_id
+            start_page.updated_at = now
+            session.add(
+                AuditLog(
+                    bot_instance_id=self.instance_id,
+                    actor_user_id=actor_user_id,
+                    action="START_PAGE_MEDIA_UPDATED",
+                    details=json.dumps({"has_photo": photo_file_id is not None}),
+                    created_at=now,
+                )
+            )
+            return start_page
+
     @staticmethod
     def validate_template(template_text: str) -> None:
         if not template_text.strip():
@@ -422,6 +501,47 @@ class BotService:
                     bot_instance_id=self.instance_id,
                     actor_user_id=actor_user_id,
                     action="BUTTONS_REPLACED",
+                    details=json.dumps({"button_count": sum(map(len, rows))}),
+                    created_at=now,
+                )
+            )
+
+    async def list_start_page_buttons(self) -> list[StartPageButton]:
+        async with self.sessions() as session:
+            result = await session.scalars(
+                select(StartPageButton)
+                .where(
+                    StartPageButton.bot_instance_id == self.instance_id,
+                    StartPageButton.enabled.is_(True),
+                )
+                .order_by(StartPageButton.row_number, StartPageButton.column_number)
+            )
+            return list(result)
+
+    async def replace_start_page_buttons(
+        self, rows: list[list[tuple[str, str]]], actor_user_id: int
+    ) -> None:
+        now = utc_now()
+        async with self.sessions.begin() as session:
+            await session.execute(
+                delete(StartPageButton).where(StartPageButton.bot_instance_id == self.instance_id)
+            )
+            for row_number, row in enumerate(rows):
+                for column_number, (button_text, url) in enumerate(row):
+                    session.add(
+                        StartPageButton(
+                            bot_instance_id=self.instance_id,
+                            text=button_text,
+                            url=url,
+                            row_number=row_number,
+                            column_number=column_number,
+                        )
+                    )
+            session.add(
+                AuditLog(
+                    bot_instance_id=self.instance_id,
+                    actor_user_id=actor_user_id,
+                    action="START_PAGE_BUTTONS_REPLACED",
                     details=json.dumps({"button_count": sum(map(len, rows))}),
                     created_at=now,
                 )
@@ -631,8 +751,15 @@ class BotService:
         keyboard = self.build_keyboard(buttons)
         return rendered, keyboard, template.version
 
+    async def start_page_payload(self) -> tuple[str, str | None, InlineKeyboardMarkup | None]:
+        start_page = await self.get_start_page()
+        buttons = await self.list_start_page_buttons()
+        return start_page.text, start_page.photo_file_id, self.build_keyboard(buttons)
+
     @staticmethod
-    def build_keyboard(buttons: list[TemplateButton]) -> InlineKeyboardMarkup | None:
+    def build_keyboard(
+        buttons: list[TemplateButton] | list[StartPageButton],
+    ) -> InlineKeyboardMarkup | None:
         valid_buttons = []
         for button in buttons:
             if BotService.is_valid_button_url(button.url):

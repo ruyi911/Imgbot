@@ -3,7 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from imgbot.handlers.admin import create_export, render_administrator_management
+from imgbot.handlers.admin import (
+    begin_start_page_media,
+    create_export,
+    render_administrator_management,
+    start,
+)
 
 
 class FakeMessage:
@@ -11,6 +16,7 @@ class FakeMessage:
         self.answers: list[str] = []
         self.answer_options: list[dict] = []
         self.documents: list[object] = []
+        self.photos: list[tuple[str, dict]] = []
 
     async def answer(self, text: str, **kwargs) -> None:
         self.answers.append(text)
@@ -18,6 +24,9 @@ class FakeMessage:
 
     async def answer_document(self, document, **kwargs) -> None:
         self.documents.append(document)
+
+    async def answer_photo(self, photo: str, **kwargs) -> None:
+        self.photos.append((photo, kwargs))
 
 
 class FakeCallback:
@@ -43,6 +52,23 @@ class FakeState:
 
     async def clear(self) -> None:
         self.cleared = True
+
+
+class EmptyState:
+    def __init__(self) -> None:
+        self.cleared = False
+
+    async def clear(self) -> None:
+        self.cleared = True
+
+
+class StateRecorder(EmptyState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_state = None
+
+    async def set_state(self, state) -> None:
+        self.current_state = state
 
 
 class FakeService:
@@ -115,3 +141,86 @@ async def test_administrator_management_displays_optional_name_and_delete_button
         if button.callback_data
     }
     assert "admins:delete:123456789" in callbacks
+
+
+class StartPageService:
+    async def start_page_payload(self):
+        return "<b>欢迎</b>", "start-photo", None
+
+    async def active_binding(self):
+        return None
+
+    async def is_admin(self, user_id: int) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_start_sends_public_page_to_every_private_user() -> None:
+    message = FakeMessage()
+    message.from_user = SimpleNamespace(id=123)
+    state = EmptyState()
+
+    await start(message, state, StartPageService(), fake_settings())
+
+    assert state.cleared is True
+    assert message.photos == [
+        ("start-photo", {"caption": "<b>欢迎</b>", "reply_markup": None})
+    ]
+    assert message.answers == []
+
+
+@pytest.mark.asyncio
+async def test_start_sends_admin_panel_after_public_page_for_administrator() -> None:
+    message = FakeMessage()
+    message.from_user = SimpleNamespace(id=42)
+    state = EmptyState()
+
+    await start(message, state, StartPageService(), fake_settings())
+
+    assert message.photos == [
+        ("start-photo", {"caption": "<b>欢迎</b>", "reply_markup": None})
+    ]
+    assert "图片登记机器人管理" in message.answers[0]
+    keyboard = message.answer_options[0]["reply_markup"]
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    assert {"admin:start_media", "admin:start_text", "admin:start_buttons"} <= callbacks
+
+
+class TextOnlyStartPageService(StartPageService):
+    async def start_page_payload(self):
+        return "<b>欢迎</b>", None, None
+
+
+@pytest.mark.asyncio
+async def test_start_without_photo_sends_one_text_message() -> None:
+    message = FakeMessage()
+    message.from_user = SimpleNamespace(id=123)
+
+    await start(message, EmptyState(), TextOnlyStartPageService(), fake_settings())
+
+    assert message.photos == []
+    assert message.answers == ["<b>欢迎</b>"]
+
+
+@pytest.mark.asyncio
+async def test_start_page_media_editor_previews_current_photo_before_prompt() -> None:
+    message = FakeMessage()
+    callback = FakeCallback(message)
+    state = StateRecorder()
+    service = SimpleNamespace(
+        get_start_page=lambda: None,
+    )
+
+    async def get_start_page():
+        return SimpleNamespace(photo_file_id="current-photo")
+
+    service.get_start_page = get_start_page
+    await begin_start_page_media(callback, state, service, fake_settings())
+
+    assert message.photos == [("current-photo", {})]
+    assert "首页媒体" in message.answers[0]
