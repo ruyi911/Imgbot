@@ -10,7 +10,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from imgbot.config import get_settings
 from imgbot.db import Database
-from imgbot.handlers import admin_router, group_router, utility_router
+from imgbot.filters import BotIdFilter
+from imgbot.handlers import (
+    admin_router,
+    assistant_router,
+    group_router,
+    utility_router,
+)
 from imgbot.service import BotService
 from imgbot.worker import ReplyWorker
 
@@ -26,11 +32,26 @@ async def main() -> None:
     database = Database(settings.database_url)
     await database.create_schema()
 
-    bot = Bot(
+    main_bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    me = await bot.get_me()
+    assistant_bots = [
+        Bot(
+            token=token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        for token in (
+            settings.assistant_bot_token_1,
+            settings.assistant_bot_token_2,
+        )
+    ]
+    bots = [main_bot, *assistant_bots]
+    identities = await asyncio.gather(*(bot.get_me() for bot in bots))
+    telegram_ids = [identity.id for identity in identities]
+    if len(set(telegram_ids)) != 3:
+        raise RuntimeError("The three configured tokens must belong to different bots")
+    me = identities[0]
     service = BotService(
         database.sessions,
         instance_key=settings.bot_instance_id,
@@ -40,33 +61,44 @@ async def main() -> None:
     await service.initialize(me)
 
     dispatcher = Dispatcher(storage=MemoryStorage())
+    main_filter = BotIdFilter({me.id})
+    utility_router.message.filter(main_filter)
+    admin_router.message.filter(main_filter)
+    admin_router.callback_query.filter(main_filter)
+    group_router.message.filter(main_filter)
     dispatcher.include_router(utility_router)
     dispatcher.include_router(admin_router)
     dispatcher.include_router(group_router)
+    assistant_router.message.filter(BotIdFilter(set(telegram_ids[1:])))
+    dispatcher.include_router(assistant_router)
     worker = ReplyWorker(
-        bot,
+        bots,
+        {identity.id: identity.username for identity in identities},
         service,
         poll_seconds=settings.reply_poll_seconds,
         min_group_interval_seconds=settings.min_group_reply_interval_seconds,
+        min_combined_interval_seconds=settings.min_combined_reply_interval_seconds,
         max_attempts=settings.reply_max_attempts,
     )
     worker.start()
     logger.info(
-        "Starting instance=%s bot=@%s timezone=%s",
+        "Starting instance=%s main=@%s assistants=%s timezone=%s",
         settings.bot_instance_id,
         me.username,
+        ",".join(f"@{identity.username}" for identity in identities[1:]),
         settings.business_timezone,
     )
     try:
         await dispatcher.start_polling(
-            bot,
+            *bots,
             service=service,
             settings=settings,
+            main_bot=main_bot,
             allowed_updates=dispatcher.resolve_used_update_types(),
         )
     finally:
         await worker.stop()
-        await bot.session.close()
+        await asyncio.gather(*(bot.session.close() for bot in bots))
         await database.dispose()
 
 

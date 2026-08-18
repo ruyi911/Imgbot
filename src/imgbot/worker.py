@@ -18,21 +18,30 @@ logger = logging.getLogger(__name__)
 class ReplyWorker:
     def __init__(
         self,
-        bot: Bot,
+        bots: list[Bot],
+        bot_usernames: dict[int, str | None],
         service: BotService,
         *,
         poll_seconds: float,
         min_group_interval_seconds: float,
+        min_combined_interval_seconds: float,
         max_attempts: int,
     ) -> None:
-        self.bot = bot
+        if not bots:
+            raise ValueError("ReplyWorker requires at least one bot")
+        self.bots = bots
+        self.bot_usernames = bot_usernames
         self.service = service
         self.poll_seconds = poll_seconds
         self.min_group_interval_seconds = min_group_interval_seconds
+        self.min_combined_interval_seconds = min_combined_interval_seconds
         self.max_attempts = max_attempts
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
-        self._last_send_monotonic: dict[int, float] = {}
+        self._last_bot_send_monotonic: dict[tuple[int, int], float] = {}
+        self._last_combined_send_monotonic: dict[int, float] = {}
+        self._bot_retry_not_before: dict[int, float] = {}
+        self._next_bot_index = 0
 
     def start(self) -> None:
         if self._task is not None:
@@ -53,10 +62,11 @@ class ReplyWorker:
             if submission is None:
                 await asyncio.sleep(self.poll_seconds)
                 continue
-            await self._respect_group_limit(submission.chat_id)
+            bot = self._next_bot()
+            await self._respect_group_limit(submission.chat_id, bot.id)
             try:
                 text, keyboard, version = await self.service.reply_payload(submission)
-                sent = await self.bot.send_message(
+                sent = await bot.send_message(
                     chat_id=submission.chat_id,
                     text=text,
                     parse_mode=ParseMode.HTML,
@@ -67,15 +77,19 @@ class ReplyWorker:
                     ),
                 )
             except TelegramRetryAfter as exc:
+                self._bot_retry_not_before[bot.id] = (
+                    asyncio.get_running_loop().time() + float(exc.retry_after) + 0.2
+                )
                 logger.warning(
-                    "Telegram rate limit for submission %s, retry in %s seconds",
+                    "Telegram rate limit bot_id=%s submission=%s, retry in %s seconds",
+                    bot.id,
                     submission.id,
                     exc.retry_after,
                 )
                 await self.service.mark_reply_failed(
                     submission.id,
                     str(exc),
-                    retry_after_seconds=float(exc.retry_after) + 0.2,
+                    retry_after_seconds=self.poll_seconds,
                     max_attempts=self.max_attempts,
                 )
             except TelegramAPIError as exc:
@@ -95,15 +109,47 @@ class ReplyWorker:
                     max_attempts=self.max_attempts,
                 )
             else:
-                self._last_send_monotonic[submission.chat_id] = asyncio.get_running_loop().time()
-                await self.service.mark_reply_sent(submission.id, sent.message_id, version)
+                sent_at = asyncio.get_running_loop().time()
+                self._last_bot_send_monotonic[(bot.id, submission.chat_id)] = sent_at
+                self._last_combined_send_monotonic[submission.chat_id] = sent_at
+                await self.service.mark_reply_sent(
+                    submission.id,
+                    sent.message_id,
+                    version,
+                    bot_telegram_id=bot.id,
+                    bot_username=self.bot_usernames.get(bot.id),
+                )
 
-    async def _respect_group_limit(self, chat_id: int) -> None:
-        previous = self._last_send_monotonic.get(chat_id)
-        if previous is None:
-            return
-        elapsed = asyncio.get_running_loop().time() - previous
-        remaining = self.min_group_interval_seconds - elapsed
+    def _next_bot(self) -> Bot:
+        now = asyncio.get_running_loop().time()
+        for offset in range(len(self.bots)):
+            index = (self._next_bot_index + offset) % len(self.bots)
+            bot = self.bots[index]
+            if self._bot_retry_not_before.get(bot.id, 0) <= now:
+                self._next_bot_index = (index + 1) % len(self.bots)
+                return bot
+        bot = min(
+            self.bots,
+            key=lambda item: self._bot_retry_not_before.get(item.id, 0),
+        )
+        self._next_bot_index = (self.bots.index(bot) + 1) % len(self.bots)
+        return bot
+
+    async def _respect_group_limit(self, chat_id: int, bot_id: int) -> None:
+        now = asyncio.get_running_loop().time()
+        bot_previous = self._last_bot_send_monotonic.get((bot_id, chat_id))
+        combined_previous = self._last_combined_send_monotonic.get(chat_id)
+        remaining = 0.0
+        remaining = max(
+            remaining, self._bot_retry_not_before.get(bot_id, 0) - now
+        )
+        if bot_previous is not None:
+            remaining = max(
+                remaining, self.min_group_interval_seconds - (now - bot_previous)
+            )
+        if combined_previous is not None:
+            remaining = max(
+                remaining, self.min_combined_interval_seconds - (now - combined_previous)
+            )
         if remaining > 0:
             await asyncio.sleep(remaining)
-

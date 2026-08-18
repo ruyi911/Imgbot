@@ -154,6 +154,24 @@ class StartPageButton(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class StartPagePhotoCache(Base):
+    __tablename__ = "start_page_photo_caches"
+    __table_args__ = (
+        UniqueConstraint(
+            "bot_instance_id", "bot_telegram_id", name="uq_start_photo_cache_bot"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bot_instance_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_instances.id"), nullable=False
+    )
+    bot_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_photo_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    cached_photo_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Submission(Base):
     __tablename__ = "submissions"
     __table_args__ = (
@@ -186,6 +204,8 @@ class Submission(Base):
     )
     reply_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reply_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    reply_bot_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    reply_bot_username: Mapped[str | None] = mapped_column(String(64))
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reply_error: Mapped[str | None] = mapped_column(Text)

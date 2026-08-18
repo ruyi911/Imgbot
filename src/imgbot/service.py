@@ -26,6 +26,7 @@ from imgbot.models import (
     ReplyTemplate,
     StartPage,
     StartPageButton,
+    StartPagePhotoCache,
     Submission,
     SubmissionPart,
     TemplateButton,
@@ -87,6 +88,7 @@ class BotService:
         self.album_settle_seconds = album_settle_seconds
         self.identity: InstanceIdentity | None = None
         self._record_lock = asyncio.Lock()
+        self._start_photo_cache_lock = asyncio.Lock()
 
     @property
     def instance_id(self) -> int:
@@ -547,6 +549,49 @@ class BotService:
                 )
             )
 
+    async def get_start_page_photo_cache(
+        self, bot_telegram_id: int, source_photo_file_id: str
+    ) -> str | None:
+        async with self.sessions() as session:
+            cache = await session.scalar(
+                select(StartPagePhotoCache).where(
+                    StartPagePhotoCache.bot_instance_id == self.instance_id,
+                    StartPagePhotoCache.bot_telegram_id == bot_telegram_id,
+                    StartPagePhotoCache.source_photo_file_id == source_photo_file_id,
+                )
+            )
+            return cache.cached_photo_file_id if cache is not None else None
+
+    async def set_start_page_photo_cache(
+        self,
+        bot_telegram_id: int,
+        source_photo_file_id: str,
+        cached_photo_file_id: str,
+    ) -> None:
+        now = utc_now()
+        async with self._start_photo_cache_lock:
+            async with self.sessions.begin() as session:
+                cache = await session.scalar(
+                    select(StartPagePhotoCache).where(
+                        StartPagePhotoCache.bot_instance_id == self.instance_id,
+                        StartPagePhotoCache.bot_telegram_id == bot_telegram_id,
+                    )
+                )
+                if cache is None:
+                    session.add(
+                        StartPagePhotoCache(
+                            bot_instance_id=self.instance_id,
+                            bot_telegram_id=bot_telegram_id,
+                            source_photo_file_id=source_photo_file_id,
+                            cached_photo_file_id=cached_photo_file_id,
+                            updated_at=now,
+                        )
+                    )
+                    return
+                cache.source_photo_file_id = source_photo_file_id
+                cache.cached_photo_file_id = cached_photo_file_id
+                cache.updated_at = now
+
     @staticmethod
     def parse_button_definition(value: str) -> list[list[tuple[str, str]]]:
         if not value.strip() or value.strip().upper() == "CLEAR":
@@ -780,7 +825,15 @@ class BotService:
         ]
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-    async def mark_reply_sent(self, submission_id: int, message_id: int, version: int) -> None:
+    async def mark_reply_sent(
+        self,
+        submission_id: int,
+        message_id: int,
+        version: int,
+        *,
+        bot_telegram_id: int,
+        bot_username: str | None,
+    ) -> None:
         async with self.sessions.begin() as session:
             await session.execute(
                 update(Submission)
@@ -788,6 +841,8 @@ class BotService:
                 .values(
                     reply_status=ReplyStatus.SENT,
                     reply_message_id=message_id,
+                    reply_bot_telegram_id=bot_telegram_id,
+                    reply_bot_username=bot_username,
                     replied_at=utc_now(),
                     next_retry_at=None,
                     reply_error=None,

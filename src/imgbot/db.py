@@ -27,16 +27,32 @@ class Database:
                 await connection.execute(
                     text("ALTER TABLE administrators ADD COLUMN display_name VARCHAR(255)")
                 )
+            if "submissions.reply_bot_telegram_id" in missing_columns:
+                await connection.execute(
+                    text("ALTER TABLE submissions ADD COLUMN reply_bot_telegram_id BIGINT")
+                )
+            if "submissions.reply_bot_username" in missing_columns:
+                await connection.execute(
+                    text("ALTER TABLE submissions ADD COLUMN reply_bot_username VARCHAR(64)")
+                )
 
     @staticmethod
     def _missing_compatibility_columns(connection: Connection) -> set[str]:
         inspector = inspect(connection)
-        if "administrators" not in inspector.get_table_names():
-            return set()
-        columns = {column["name"] for column in inspector.get_columns("administrators")}
+        table_names = set(inspector.get_table_names())
         missing: set[str] = set()
-        if "display_name" not in columns:
-            missing.add("administrators.display_name")
+        if "administrators" in table_names:
+            columns = {
+                column["name"] for column in inspector.get_columns("administrators")
+            }
+            if "display_name" not in columns:
+                missing.add("administrators.display_name")
+        if "submissions" in table_names:
+            columns = {column["name"] for column in inspector.get_columns("submissions")}
+            if "reply_bot_telegram_id" not in columns:
+                missing.add("submissions.reply_bot_telegram_id")
+            if "reply_bot_username" not in columns:
+                missing.add("submissions.reply_bot_username")
         return missing
 
     async def dispose(self) -> None:

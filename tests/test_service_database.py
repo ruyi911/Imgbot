@@ -133,3 +133,37 @@ async def test_start_page_content_is_saved_separately_from_group_reply(service: 
     assert keyboard is not None
     assert keyboard.inline_keyboard[0][0].text == "官方群"
     assert keyboard.inline_keyboard[0][0].url == "https://t.me/example"
+
+
+@pytest.mark.asyncio
+async def test_assistant_start_photo_cache_is_scoped_to_source_photo(
+    service: BotService,
+) -> None:
+    assert await service.get_start_page_photo_cache(2001, "source-a") is None
+    await service.set_start_page_photo_cache(2001, "source-a", "assistant-a")
+    assert await service.get_start_page_photo_cache(2001, "source-a") == "assistant-a"
+    assert await service.get_start_page_photo_cache(2001, "source-b") is None
+
+    await service.set_start_page_photo_cache(2001, "source-b", "assistant-b")
+    assert await service.get_start_page_photo_cache(2001, "source-a") is None
+    assert await service.get_start_page_photo_cache(2001, "source-b") == "assistant-b"
+
+
+@pytest.mark.asyncio
+async def test_sent_reply_records_which_bot_sent_it(service: BotService) -> None:
+    await service.record_photo(make_message(50))
+    pending = await service.next_pending_reply(datetime.now(UTC))
+    assert pending is not None
+    await service.mark_reply_sent(
+        pending.id,
+        9001,
+        3,
+        bot_telegram_id=2002,
+        bot_username="assistant_two",
+    )
+    rows = await service.export_rows(
+        datetime(2026, 8, 3, 0, 0, tzinfo=UTC),
+        datetime(2026, 8, 4, 0, 0, tzinfo=UTC),
+    )
+    assert rows[0].reply_bot_telegram_id == 2002
+    assert rows[0].reply_bot_username == "assistant_two"
