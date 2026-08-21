@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from imgbot.models import (
@@ -149,7 +149,13 @@ class BotService:
                     Submission.bot_instance_id == instance.id,
                     Submission.reply_status == ReplyStatus.SENDING,
                 )
-                .values(reply_status=ReplyStatus.RETRYING, next_retry_at=now)
+                .values(
+                    reply_status=ReplyStatus.RETRYING,
+                    next_retry_at=now,
+                    sending_started_at=None,
+                    reply_error="进程重启时恢复未完成的发送任务",
+                    reply_error_type="PROCESS_RESTART_RECOVERY",
+                )
             )
             self.identity = InstanceIdentity(
                 id=instance.id,
@@ -753,24 +759,70 @@ class BotService:
                 submission.photo_count += 1
                 return RecordResult(accepted=True, created=created, submission_id=submission.id)
 
-    async def next_pending_reply(self, now: datetime) -> Submission | None:
+    async def next_pending_reply(
+        self, now: datetime, *, sending_lease_seconds: float = 90
+    ) -> Submission | None:
         async with self.sessions.begin() as session:
-            submission = await session.scalar(
-                select(Submission)
+            lease_expired_before = now - timedelta(seconds=sending_lease_seconds)
+            active_binding_ids = select(GroupBinding.id).where(
+                GroupBinding.status == BindingStatus.ACTIVE
+            )
+            await session.execute(
+                update(Submission)
                 .where(
                     Submission.bot_instance_id == self.instance_id,
+                    Submission.reply_status == ReplyStatus.SENDING,
+                    Submission.sending_started_at <= lease_expired_before,
+                    Submission.group_binding_id.in_(active_binding_ids),
+                )
+                .values(
+                    reply_status=ReplyStatus.RETRYING,
+                    next_retry_at=now,
+                    sending_started_at=None,
+                    reply_error="发送任务超过 lease，已自动恢复",
+                    reply_error_type="SENDING_LEASE_EXPIRED",
+                )
+            )
+            await session.execute(
+                update(Submission)
+                .where(
+                    Submission.bot_instance_id == self.instance_id,
+                    Submission.reply_status == ReplyStatus.SENDING,
+                    Submission.sending_started_at <= lease_expired_before,
+                    Submission.group_binding_id.not_in(active_binding_ids),
+                )
+                .values(
+                    reply_status=ReplyStatus.CANCELLED,
+                    next_retry_at=None,
+                    sending_started_at=None,
+                    reply_error="群组已解除绑定，取消过期发送任务",
+                    reply_error_type="GROUP_UNBOUND",
+                )
+            )
+            submission = await session.scalar(
+                select(Submission)
+                .join(GroupBinding, Submission.group_binding_id == GroupBinding.id)
+                .where(
+                    Submission.bot_instance_id == self.instance_id,
+                    GroupBinding.status == BindingStatus.ACTIVE,
                     Submission.reply_status.in_([ReplyStatus.PENDING, ReplyStatus.RETRYING]),
                     Submission.reply_not_before <= now,
                     or_(Submission.next_retry_at.is_(None), Submission.next_retry_at <= now),
                 )
-                .order_by(Submission.sent_at)
+                .order_by(
+                    case((Submission.reply_status == ReplyStatus.PENDING, 0), else_=1),
+                    Submission.sent_at,
+                    Submission.id,
+                )
                 .limit(1)
+                .with_for_update(skip_locked=True, of=Submission)
             )
             if submission is None:
                 return None
             submission.reply_status = ReplyStatus.SENDING
             submission.reply_attempts += 1
-            submission.reply_error = None
+            submission.next_retry_at = None
+            submission.sending_started_at = now
             await session.flush()
             session.expunge(submission)
             return submission
@@ -833,11 +885,16 @@ class BotService:
         *,
         bot_telegram_id: int,
         bot_username: str | None,
-    ) -> None:
+        expected_attempt: int,
+    ) -> bool:
         async with self.sessions.begin() as session:
-            await session.execute(
+            result = await session.execute(
                 update(Submission)
-                .where(Submission.id == submission_id)
+                .where(
+                    Submission.id == submission_id,
+                    Submission.reply_status == ReplyStatus.SENDING,
+                    Submission.reply_attempts == expected_attempt,
+                )
                 .values(
                     reply_status=ReplyStatus.SENT,
                     reply_message_id=message_id,
@@ -845,32 +902,53 @@ class BotService:
                     reply_bot_username=bot_username,
                     replied_at=utc_now(),
                     next_retry_at=None,
+                    sending_started_at=None,
                     reply_error=None,
+                    reply_error_type=None,
                     template_version=version,
                 )
             )
+            return bool(result.rowcount)
 
     async def mark_reply_failed(
         self,
         submission_id: int,
         error: str,
         *,
+        error_type: str,
         retry_after_seconds: float | None,
         max_attempts: int,
-    ) -> None:
+        expected_attempt: int,
+        retryable: bool = True,
+    ) -> ReplyStatus | None:
         async with self.sessions.begin() as session:
-            submission = await session.get(Submission, submission_id)
+            submission = await session.scalar(
+                select(Submission)
+                .where(
+                    Submission.id == submission_id,
+                    Submission.reply_status == ReplyStatus.SENDING,
+                    Submission.reply_attempts == expected_attempt,
+                )
+                .with_for_update()
+            )
             if submission is None:
-                return
-            retryable = submission.reply_attempts < max_attempts
-            if retryable:
-                delay = retry_after_seconds or min(300, 2 ** submission.reply_attempts)
+                return None
+            should_retry = retryable and submission.reply_attempts < max_attempts
+            if should_retry:
+                delay = (
+                    retry_after_seconds
+                    if retry_after_seconds is not None
+                    else min(300, 2 ** max(0, submission.reply_attempts - 1))
+                )
                 submission.reply_status = ReplyStatus.RETRYING
                 submission.next_retry_at = utc_now() + timedelta(seconds=delay)
             else:
                 submission.reply_status = ReplyStatus.FAILED
                 submission.next_retry_at = None
+            submission.sending_started_at = None
             submission.reply_error = error[:2000]
+            submission.reply_error_type = error_type[:64]
+            return submission.reply_status
 
     async def export_rows(self, start_utc: datetime, end_utc: datetime) -> list[Submission]:
         async with self.sessions() as session:
@@ -904,6 +982,20 @@ class BotService:
                     Submission.reply_status == ReplyStatus.FAILED,
                 )
             )
+            sending = await session.scalar(
+                select(func.count(Submission.id)).where(
+                    Submission.bot_instance_id == self.instance_id,
+                    Submission.reply_status == ReplyStatus.SENDING,
+                )
+            )
+            oldest_queued = await session.scalar(
+                select(func.min(Submission.received_at)).where(
+                    Submission.bot_instance_id == self.instance_id,
+                    Submission.reply_status.in_(
+                        [ReplyStatus.PENDING, ReplyStatus.RETRYING, ReplyStatus.SENDING]
+                    ),
+                )
+            )
             last_sent = await session.scalar(
                 select(func.max(Submission.sent_at)).where(
                     Submission.bot_instance_id == self.instance_id
@@ -913,5 +1005,7 @@ class BotService:
             "total": total or 0,
             "pending": pending or 0,
             "failed": failed or 0,
+            "sending": sending or 0,
+            "oldest_queued": oldest_queued,
             "last_sent": last_sent,
         }

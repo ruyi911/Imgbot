@@ -5,10 +5,11 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from imgbot.config import get_settings
+from imgbot.config import Settings, get_settings
 from imgbot.db import Database
 from imgbot.filters import BotIdFilter
 from imgbot.handlers import (
@@ -23,6 +24,21 @@ from imgbot.worker import ReplyWorker
 logger = logging.getLogger(__name__)
 
 
+def build_bots(settings: Settings) -> list[Bot]:
+    return [
+        Bot(
+            token=token,
+            session=AiohttpSession(timeout=settings.reply_request_timeout_seconds),
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        for token in (
+            settings.bot_token,
+            settings.assistant_bot_token_1,
+            settings.assistant_bot_token_2,
+        )
+    ]
+
+
 async def main() -> None:
     settings = get_settings()
     logging.basicConfig(
@@ -32,21 +48,8 @@ async def main() -> None:
     database = Database(settings.database_url)
     await database.create_schema()
 
-    main_bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    assistant_bots = [
-        Bot(
-            token=token,
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        )
-        for token in (
-            settings.assistant_bot_token_1,
-            settings.assistant_bot_token_2,
-        )
-    ]
-    bots = [main_bot, *assistant_bots]
+    bots = build_bots(settings)
+    main_bot = bots[0]
     identities = await asyncio.gather(*(bot.get_me() for bot in bots))
     telegram_ids = [identity.id for identity in identities]
     if len(set(telegram_ids)) != 3:
@@ -79,6 +82,8 @@ async def main() -> None:
         min_group_interval_seconds=settings.min_group_reply_interval_seconds,
         min_combined_interval_seconds=settings.min_combined_reply_interval_seconds,
         max_attempts=settings.reply_max_attempts,
+        request_timeout_seconds=settings.reply_request_timeout_seconds,
+        sending_lease_seconds=settings.reply_sending_lease_seconds,
     )
     worker.start()
     logger.info(

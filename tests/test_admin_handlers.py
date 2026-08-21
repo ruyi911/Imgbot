@@ -7,6 +7,7 @@ from imgbot.handlers.admin import (
     begin_start_page_media,
     create_export,
     render_administrator_management,
+    render_statistics,
     start,
 )
 
@@ -224,3 +225,27 @@ async def test_start_page_media_editor_previews_current_photo_before_prompt() ->
 
     assert message.photos == [("current-photo", {})]
     assert "首页媒体" in message.answers[0]
+
+
+class FailedReplyService:
+    def __init__(self) -> None:
+        self.failed = 2
+
+    async def statistics(self):
+        return {
+            "total": 2,
+            "pending": 0,
+            "failed": self.failed,
+            "last_sent": None,
+        }
+
+
+@pytest.mark.asyncio
+async def test_statistics_does_not_offer_manual_failed_reply_retry() -> None:
+    message = FakeMessage()
+    service = FailedReplyService()
+
+    await render_statistics(message, service, fake_settings())
+
+    assert "回复失败：2" in message.answers[-1]
+    assert "reply_markup" not in message.answer_options[-1]

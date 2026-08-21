@@ -97,6 +97,12 @@ docker compose -p imgbot01 --env-file .env.bot01 up -d --build
 - 默认配置理论上约为每分钟 57 条，给 Telegram 的每群每机器人 20 条/分钟限制留出余量。
 - Telegram 返回 `429` 时只让当前发送失败的记录重试，下一次轮询会换用下一个机器人。
 - 数据库会记录实际完成回复的机器人 ID 和用户名，但现有 CSV/XLSX 用户导出字段保持不变。
+- `REPLY_REQUEST_TIMEOUT_SECONDS=3`：三个 Bot 各自使用独立的 HTTP session，所有 Telegram API 请求默认最多等待 3 秒；Worker 的 `send_message` 也显式使用该值，避免单次请求长时间阻塞队列。
+- `REPLY_SENDING_LEASE_SECONDS=90`：超过 lease 仍停留在 `SENDING` 的任务会在运行期恢复为重试。
+- 网络错误总共最多尝试 3 次（首次发送 + 2 次重试），两次重试分别等待 1 秒、2 秒；第三次失败后进入 `FAILED`。
+- 重试等待写入 `next_retry_at` 后立即释放 Worker，不会在原任务中 `sleep`；队列始终先处理新 `PENDING`，再处理已到期的旧 `RETRYING`，同一状态内按发送时间 FIFO。
+- 超时或连接重置会记录为发送结果不确定；Telegram 可能已收到请求，因此重试仍存在小概率重复回复。
+- 超级管理员可在“运行统计”查看队列和失败数量；`FAILED` 记录保留在数据库中用于审计，不提供人工重新入队入口。
 
 ## 私聊按钮配置格式
 

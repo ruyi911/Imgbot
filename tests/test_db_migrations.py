@@ -44,5 +44,10 @@ async def test_existing_submission_table_gets_reply_bot_columns() -> None:
                 for column in inspect(sync_connection).get_columns("submissions")
             }
         )
-    assert {"reply_bot_telegram_id", "reply_bot_username"} <= columns
+    assert {
+        "reply_bot_telegram_id",
+        "reply_bot_username",
+        "sending_started_at",
+        "reply_error_type",
+    } <= columns
     await database.dispose()

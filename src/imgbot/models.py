@@ -179,6 +179,14 @@ class Submission(Base):
             "bot_instance_id", "chat_id", "submission_key", name="uq_submission_key"
         ),
         Index("ix_submissions_sent_at", "bot_instance_id", "sent_at"),
+        Index(
+            "ix_submissions_reply_queue",
+            "bot_instance_id",
+            "reply_status",
+            "next_retry_at",
+            "reply_not_before",
+            "sent_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -208,7 +216,9 @@ class Submission(Base):
     reply_bot_username: Mapped[str | None] = mapped_column(String(64))
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sending_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reply_error: Mapped[str | None] = mapped_column(Text)
+    reply_error_type: Mapped[str | None] = mapped_column(String(64))
     template_version: Mapped[int | None] = mapped_column(Integer)
 
     parts: Mapped[list[SubmissionPart]] = relationship(

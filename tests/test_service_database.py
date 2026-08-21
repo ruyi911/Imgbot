@@ -1,10 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from imgbot.db import Database
+from imgbot.models import ReplyStatus, Submission
 from imgbot.service import BotService, PendingBinding
+from imgbot.timeutils import ensure_utc
 
 
 @pytest.fixture
@@ -160,6 +162,7 @@ async def test_sent_reply_records_which_bot_sent_it(service: BotService) -> None
         3,
         bot_telegram_id=2002,
         bot_username="assistant_two",
+        expected_attempt=pending.reply_attempts,
     )
     rows = await service.export_rows(
         datetime(2026, 8, 3, 0, 0, tzinfo=UTC),
@@ -167,3 +170,130 @@ async def test_sent_reply_records_which_bot_sent_it(service: BotService) -> None
     )
     assert rows[0].reply_bot_telegram_id == 2002
     assert rows[0].reply_bot_username == "assistant_two"
+
+
+@pytest.mark.asyncio
+async def test_network_failure_retries_twice_then_becomes_failed(
+    service: BotService, monkeypatch
+) -> None:
+    await service.record_photo(make_message(60))
+    future = datetime.now(UTC) + timedelta(days=1)
+    failure_time = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("imgbot.service.utc_now", lambda: failure_time)
+
+    for expected_attempt in range(1, 4):
+        submission = await service.next_pending_reply(
+            future, sending_lease_seconds=90
+        )
+        assert submission is not None
+        assert submission.reply_attempts == expected_attempt
+        if expected_attempt > 1:
+            assert submission.reply_error == "network unavailable"
+            assert submission.reply_error_type == "TELEGRAM_NETWORK"
+        status = await service.mark_reply_failed(
+            submission.id,
+            "network unavailable",
+            error_type="TELEGRAM_NETWORK",
+            retry_after_seconds=None,
+            max_attempts=3,
+            expected_attempt=expected_attempt,
+        )
+        expected_status = (
+            ReplyStatus.RETRYING if expected_attempt < 3 else ReplyStatus.FAILED
+        )
+        assert status == expected_status
+        rows = await service.export_rows(
+            datetime(2026, 8, 3, 0, 0, tzinfo=UTC),
+            datetime(2026, 8, 4, 0, 0, tzinfo=UTC),
+        )
+        expected_retry_at = (
+            failure_time + timedelta(seconds=2 ** (expected_attempt - 1))
+            if expected_attempt < 3
+            else None
+        )
+        actual_retry_at = rows[0].next_retry_at
+        assert (
+            ensure_utc(actual_retry_at) if actual_retry_at is not None else None
+        ) == expected_retry_at
+
+    rows = await service.export_rows(
+        datetime(2026, 8, 3, 0, 0, tzinfo=UTC),
+        datetime(2026, 8, 4, 0, 0, tzinfo=UTC),
+    )
+    assert rows[0].reply_status == ReplyStatus.FAILED
+    assert rows[0].reply_attempts == 3
+    assert rows[0].reply_error_type == "TELEGRAM_NETWORK"
+    assert rows[0].next_retry_at is None
+    assert rows[0].sending_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_new_pending_reply_is_claimed_before_due_retry(
+    service: BotService, monkeypatch
+) -> None:
+    first = await service.record_photo(make_message(62))
+    claim_time = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+    retrying = await service.next_pending_reply(
+        claim_time, sending_lease_seconds=90
+    )
+    assert retrying is not None
+    assert retrying.id == first.submission_id
+
+    monkeypatch.setattr("imgbot.service.utc_now", lambda: claim_time)
+    status = await service.mark_reply_failed(
+        retrying.id,
+        "temporary network failure",
+        error_type="TELEGRAM_NETWORK",
+        retry_after_seconds=1,
+        max_attempts=3,
+        expected_attempt=retrying.reply_attempts,
+    )
+    assert status == ReplyStatus.RETRYING
+
+    second = await service.record_photo(make_message(63))
+    pending = await service.next_pending_reply(
+        claim_time + timedelta(seconds=2), sending_lease_seconds=90
+    )
+
+    assert pending is not None
+    assert pending.id == second.submission_id
+
+
+@pytest.mark.asyncio
+async def test_expired_sending_lease_is_reclaimed_and_stale_writer_is_rejected(
+    service: BotService,
+) -> None:
+    await service.record_photo(make_message(61))
+    now = datetime.now(UTC)
+    first_claim = await service.next_pending_reply(now, sending_lease_seconds=90)
+    assert first_claim is not None
+
+    async with service.sessions.begin() as session:
+        stored = await session.get(Submission, first_claim.id)
+        assert stored is not None
+        stored.sending_started_at = now - timedelta(seconds=120)
+
+    second_claim = await service.next_pending_reply(now, sending_lease_seconds=90)
+    assert second_claim is not None
+    assert second_claim.id == first_claim.id
+    assert second_claim.reply_attempts == 2
+
+    stale_update = await service.mark_reply_sent(
+        first_claim.id,
+        9100,
+        1,
+        bot_telegram_id=2001,
+        bot_username="stale_bot",
+        expected_attempt=1,
+    )
+    assert stale_update is False
+
+    current_update = await service.mark_reply_sent(
+        second_claim.id,
+        9101,
+        1,
+        bot_telegram_id=2002,
+        bot_username="current_bot",
+        expected_attempt=2,
+    )
+    assert current_update is True

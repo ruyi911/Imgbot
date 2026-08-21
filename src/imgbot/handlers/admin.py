@@ -825,13 +825,9 @@ async def confirm_delete_administrator_handler(
     await render_administrator_management(callback.message, service, settings)
 
 
-@router.callback_query(F.data == "admin:stats")
-async def show_stats(
-    callback: CallbackQuery, service: BotService, settings: Settings
+async def render_statistics(
+    target: Message, service: BotService, settings: Settings
 ) -> None:
-    if not is_super_admin(callback.from_user.id, settings):
-        await reject_callback(callback)
-        return
     stats = await service.statistics()
     last_sent = stats["last_sent"]
     if isinstance(last_sent, datetime):
@@ -843,15 +839,35 @@ async def show_stats(
     else:
         last_display = "—"
     india_now = utc_now().astimezone(ZoneInfo(settings.business_timezone))
-    await callback.answer()
-    await callback.message.answer(
+    oldest_queued = stats.get("oldest_queued")
+    if isinstance(oldest_queued, datetime):
+        queued_seconds = max(
+            0, int((utc_now() - ensure_utc(oldest_queued)).total_seconds())
+        )
+        oldest_queued_display = f"{queued_seconds} 秒"
+    else:
+        oldest_queued_display = "—"
+    await target.answer(
         "<b>运行统计</b>\n\n"
         f"累计记录：{stats['total']}\n"
         f"等待/重试回复：{stats['pending']}\n"
+        f"正在发送：{stats.get('sending', 0)}\n"
         f"回复失败：{stats['failed']}\n"
+        f"最早队列等待：{oldest_queued_display}\n"
         f"最后收到照片：{last_display}\n"
-        f"当前时间（印度）：{india_now:%Y-%m-%d %H:%M:%S}"
+        f"当前时间（印度）：{india_now:%Y-%m-%d %H:%M:%S}",
     )
+
+
+@router.callback_query(F.data == "admin:stats")
+async def show_stats(
+    callback: CallbackQuery, service: BotService, settings: Settings
+) -> None:
+    if not is_super_admin(callback.from_user.id, settings):
+        await reject_callback(callback)
+        return
+    await callback.answer()
+    await render_statistics(callback.message, service, settings)
 
 
 @router.callback_query(F.data == "admin:verify")

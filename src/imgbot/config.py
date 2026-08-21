@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     min_group_reply_interval_seconds: float = Field(default=3.1, ge=1, le=60)
     min_combined_reply_interval_seconds: float = Field(default=1.05, ge=1, le=10)
     reply_poll_seconds: float = Field(default=0.5, ge=0.1, le=10)
-    reply_max_attempts: int = Field(default=5, ge=1, le=20)
+    reply_max_attempts: int = Field(default=3, ge=1, le=3)
+    reply_request_timeout_seconds: int = Field(default=3, ge=1, le=60)
+    reply_sending_lease_seconds: float = Field(default=90, ge=10, le=600)
     log_level: str = "INFO"
 
     @field_validator("super_admin_ids", mode="before")
@@ -62,6 +64,11 @@ class Settings(BaseSettings):
         }
         if len(tokens) != 3:
             raise ValueError("BOT_TOKEN and assistant bot tokens must be different")
+        if self.reply_sending_lease_seconds < self.reply_request_timeout_seconds + 5:
+            raise ValueError(
+                "REPLY_SENDING_LEASE_SECONDS must be at least "
+                "REPLY_REQUEST_TIMEOUT_SECONDS + 5"
+            )
         return self
 
 

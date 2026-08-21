@@ -35,6 +35,49 @@ class Database:
                 await connection.execute(
                     text("ALTER TABLE submissions ADD COLUMN reply_bot_username VARCHAR(64)")
                 )
+            if "submissions.sending_started_at" in missing_columns:
+                timestamp_type = (
+                    "TIMESTAMP WITH TIME ZONE"
+                    if connection.dialect.name == "postgresql"
+                    else "DATETIME"
+                )
+                await connection.execute(
+                    text(
+                        "ALTER TABLE submissions "
+                        f"ADD COLUMN sending_started_at {timestamp_type}"
+                    )
+                )
+            if "submissions.reply_error_type" in missing_columns:
+                await connection.execute(
+                    text("ALTER TABLE submissions ADD COLUMN reply_error_type VARCHAR(64)")
+                )
+            submission_columns = await connection.run_sync(
+                lambda sync_connection: (
+                    {
+                        column["name"]
+                        for column in inspect(sync_connection).get_columns("submissions")
+                    }
+                    if "submissions"
+                    in set(inspect(sync_connection).get_table_names())
+                    else set()
+                )
+            )
+            queue_index_columns = {
+                "bot_instance_id",
+                "reply_status",
+                "next_retry_at",
+                "reply_not_before",
+                "sent_at",
+            }
+            if queue_index_columns <= submission_columns:
+                await connection.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_submissions_reply_queue "
+                        "ON submissions "
+                        "(bot_instance_id, reply_status, next_retry_at, "
+                        "reply_not_before, sent_at)"
+                    )
+                )
 
     @staticmethod
     def _missing_compatibility_columns(connection: Connection) -> set[str]:
@@ -53,6 +96,10 @@ class Database:
                 missing.add("submissions.reply_bot_telegram_id")
             if "reply_bot_username" not in columns:
                 missing.add("submissions.reply_bot_username")
+            if "sending_started_at" not in columns:
+                missing.add("submissions.sending_started_at")
+            if "reply_error_type" not in columns:
+                missing.add("submissions.reply_error_type")
         return missing
 
     async def dispose(self) -> None:
